@@ -1,5 +1,5 @@
 {
-    "name": "olleksi/bbcodes",
+    "name": "forumtaro/bbcodes",
     "description": "Кастомні BB-коди, приховування кнопок редактора та галерея Таро",
     "type": "flarum-extension",
     "require": {
