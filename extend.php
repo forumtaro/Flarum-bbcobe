@@ -24,570 +24,935 @@ class SaveBbcodesHandler implements RequestHandlerInterface
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
         $actor = RequestUtil::getActor($request);
-        $actor->assertAdmin();
+        
+        if (!$actor->isAdmin()) {
+            return new JsonResponse(['error' => 'Unauthorized'], 403);
+        }
 
         $body = $request->getParsedBody();
         $bbcodes = Arr::get($body, 'bbcodes', []);
 
         $clean = array_values(array_filter(array_map(function ($item) {
-            if (empty($item['name'])) return null;
+            if (empty($item['name']) || strlen(trim($item['name'])) === 0) {
+                return null;
+            }
+
+            $name = preg_replace('/[^a-zA-Zа-яА-ЯіІїЇєЄ0-9\s\-_]/u', '', trim($item['name']));
+            if (empty($name) || strlen($name) > 32) {
+                return null;
+            }
+
+            $icon = $this->sanitizeIcon($item['icon'] ?? 'fa-star');
+            $tooltip = $this->sanitizeText($item['tooltip'] ?? '', 64);
+            $open = $this->sanitizeText($item['open'] ?? '', 128);
+            $close = $this->sanitizeText($item['close'] ?? '', 128);
+
+            if ($this->containsDangerousContent($open) || $this->containsDangerousContent($close)) {
+                return null;
+            }
+
             return [
-                'name'    => substr(trim($item['name']), 0, 32),
-                'icon'    => substr(trim($item['icon'] ?? 'fa-star'), 0, 32),
-                'tooltip' => substr(trim($item['tooltip'] ?? ''), 0, 64),
-                'open'    => substr(trim($item['open'] ?? ''), 0, 128),
-                'close'   => substr(trim($item['close'] ?? ''), 0, 128),
+                'name'    => $name,
+                'icon'    => $icon,
+                'tooltip' => $tooltip,
+                'open'    => $open,
+                'close'   => $close,
                 'visible' => (bool)($item['visible'] ?? true),
             ];
         }, $bbcodes)));
 
-        $this->settings->set('forumtaro-bbcodes.custom_bbcodes', json_encode($clean));
+        if (count($clean) > 50) {
+            $clean = array_slice($clean, 0, 50);
+        }
 
-        return new JsonResponse(['success' => true, 'bbcodes' => $clean]);
-    }
-}
+        $jsonData = json_encode($clean, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT);
+        if ($jsonData === false || json_last_error() !== JSON_ERROR_NONE) {
+            return new JsonResponse(['error' => 'Failed to encode data'], 500);
+        }
 
-return [
-    // ─── API роут для збереження BB-кодів ────────────────────────────────────
-    (new Extend\Routes('api'))
-        ->post('/forumtaro-bbcodes', 'forumtaro.bbcodes.save', SaveBbcodesHandler::class),
+        if (strlen($jsonData) > 65535) {
+            return new JsonResponse(['error' => 'Data too large'], 413);
+        }
 
-    // ─── Форум ───────────────────────────────────────────────────────────────
-    (new Extend\Frontend('forum'))
-        ->content(function (\Flarum\Frontend\Document $document) {
-            $settings = resolve(SettingsRepositoryInterface::class);
+        $this->settings->set('forumtaro-bbcodes.custom_bbcodes', $jsonData);
 
-            $hideBold        = $settings->get('forumtaro-bbcodes.hide_bold', false);
-            $hideItalic      = $settings->get('forumtaro-bbcodes.hide_italic', false);
-            $hideUnderline   = $settings->get('forumtaro-bbcodes.hide_underline', false);
-            $hideLink        = $settings->get('forumtaro-bbcodes.hide_link', false);
-            $hideImage       = $settings->get('forumtaro-bbcodes.hide_image', false);
-            $hideCode        = $settings->get('forumtaro-bbcodes.hide_code', false);
-            $hideQuote       = $settings->get('forumtaro-bbcodes.hide_quote', false);
-            $hideStrike      = $settings->get('forumtaro-bbcodes.hide_strike', false);
-            $hideHeader      = $settings->get('forumtaro-bbcodes.hide_header', false);
-            $hideList        = $settings->get('forumtaro-bbcodes.hide_list', false);
-            $hideSpoiler     = $settings->get('forumtaro-bbcodes.hide_spoiler', false);
-            $hideMention     = $settings->get('forumtaro-bbcodes.hide_mention', false);
-            $hidePreview     = $settings->get('forumtaro-bbcodes.hide_preview', false);
-
-            $customBbcodesJson = $settings->get('forumtaro-bbcodes.custom_bbcodes', '[]');
-            $customBbcodes = json_encode(json_decode($customBbcodesJson, true) ?: []);
-
-            $hideMapJson = json_encode([
-                'fa-bold' => $hideBold,
-                'fa-italic' => $hideItalic,
-                'fa-underline' => $hideUnderline,
-                'fa-link' => $hideLink,
-                'fa-image' => $hideImage,
-                'fa-code' => $hideCode,
-                'fa-quote-left' => $hideQuote,
-                'fa-strikethrough' => $hideStrike,
-                'fa-heading' => $hideHeader,
-                'fa-list-ul' => $hideList,
-                'fa-list-ol' => $hideList,
-                'fa-exclamation-triangle' => $hideSpoiler,
-                'fa-at' => $hideMention,
-                'fa-eye' => $hidePreview
-            ]);
-
-            // CSS та JS для галереї + основний функціонал
-            $document->head[] = '<style>
-.gallery-modal {
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.5);
-    z-index: 99999;
-    justify-content: center;
-    align-items: center;
-}
-.gallery-modal-content {
-    background: white;
-    width: 90%;
-    max-width: 1200px;
-    height: 80%;
-    max-height: 800px;
-    border-radius: 10px;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 5px 20px rgba(0,0,0,0.3);
-}
-.gallery-modal-header {
-    padding: 15px;
-    border-bottom: 1px solid #ddd;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.gallery-modal-header h3 {
-    margin: 0;
-    font-size: 18px;
-}
-.gallery-close {
-    background: none;
-    border: none;
-    font-size: 28px;
-    cursor: pointer;
-    width: 35px;
-    height: 35px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.gallery-close:hover {
-    background: #f0f0f0;
-}
-.gallery-modal-body {
-    flex: 1;
-    overflow: auto;
-    padding: 0;
-}
-.gallery-modal-body iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-}
-@media (max-width: 768px) {
-    .gallery-modal {
-        align-items: flex-end;
-    }
-    .gallery-modal-content {
-        width: 100%;
-        height: 85%;
-        max-height: 85%;
-        border-radius: 15px 15px 0 0;
-    }
-}
-</style>
-<script>
-window.olleksiHomepageInit = function() {
-    var hideMap = ' . $hideMapJson . ';
-    var customBbcodes = ' . $customBbcodes . ';
-
-    function insertAtCursor(textarea, open, close) {
-        if (!textarea) return;
-        var start = textarea.selectionStart;
-        var end   = textarea.selectionEnd;
-        var sel   = textarea.value.substring(start, end);
-        var replacement = open + sel + close;
-        textarea.value = textarea.value.substring(0, start) + replacement + textarea.value.substring(end);
-        textarea.focus();
-        textarea.selectionStart = start + open.length;
-        textarea.selectionEnd = start + open.length + sel.length;
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        return new JsonResponse([
+            'success' => true, 
+            'bbcodes' => $clean,
+            'count' => count($clean)
+        ]);
     }
 
-    function hideStandardButtons(toolbar) {
-        if (!toolbar) return;
+    private function sanitizeIcon(string $icon): string
+    {
+        $icon = preg_replace('/[^a-zA-Z0-9\-]/', '', trim($icon));
         
-        var buttons = toolbar.querySelectorAll("button, .Button");
-        buttons.forEach(function(button) {
-            var icon = button.querySelector(".icon, .fas, .far, .fal");
-            if (!icon) return;
+        $allowedPrefixes = ['fa-', 'fas-', 'far-', 'fal-', 'fab-'];
+        
+        $hasValidPrefix = false;
+        foreach ($allowedPrefixes as $prefix) {
+            if (strpos($icon, $prefix) === 0) {
+                $hasValidPrefix = true;
+                break;
+            }
+        }
+        
+        if (!$hasValidPrefix && !empty($icon)) {
+            $icon = 'fa-' . $icon;
+        }
+        
+        $icon = substr($icon, 0, 32);
+        return $icon ?: 'fa-star';
+    }
+
+    private function sanitizeText(string $text, int $maxLength): string
+    {
+        $text = str_replace("\0", '', $text);
+        $text = htmlspecialchars(trim($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        return substr($text, 0, $maxLength);
+    }
+
+    private function containsDangerousContent(string $text): bool
+    {
+        $dangerous = [
+            'javascript:', 'data:', 'vbscript:',
+            '<script', '</script', 'onerror=', 'onload=',
+            'onclick=', 'eval(', 'expression(',
+            '<iframe', '</iframe', '<object', '</object',
+            '<embed', '</embed'
+        ];
+        
+        $lowerText = strtolower($text);
+        foreach ($dangerous as $pattern) {
+            if (strpos($lowerText, $pattern) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+}
+
+// ─── Хелпер для отримання та валідації налаштувань ─────────────────────────
+function getValidatedSettings(SettingsRepositoryInterface $settings): array
+{
+    $rawBbcodes = $settings->get('forumtaro-bbcodes.custom_bbcodes', '[]');
+    $decoded = json_decode($rawBbcodes, true);
+    
+    if (!is_array($decoded)) {
+        $decoded = [];
+    }
+    
+    $validated = array_filter($decoded, function($item) {
+        return is_array($item) && 
+               isset($item['name']) && 
+               !empty(trim($item['name']));
+    });
+
+    return [
+        'custom_bbcodes' => array_values($validated),
+        'hide_bold' => (bool)$settings->get('forumtaro-bbcodes.hide_bold', false),
+        'hide_italic' => (bool)$settings->get('forumtaro-bbcodes.hide_italic', false),
+        'hide_underline' => (bool)$settings->get('forumtaro-bbcodes.hide_underline', false),
+        'hide_link' => (bool)$settings->get('forumtaro-bbcodes.hide_link', false),
+        'hide_image' => (bool)$settings->get('forumtaro-bbcodes.hide_image', false),
+        'hide_code' => (bool)$settings->get('forumtaro-bbcodes.hide_code', false),
+        'hide_quote' => (bool)$settings->get('forumtaro-bbcodes.hide_quote', false),
+        'hide_strike' => (bool)$settings->get('forumtaro-bbcodes.hide_strike', false),
+        'hide_header' => (bool)$settings->get('forumtaro-bbcodes.hide_header', false),
+        'hide_list' => (bool)$settings->get('forumtaro-bbcodes.hide_list', false),
+        'hide_spoiler' => (bool)$settings->get('forumtaro-bbcodes.hide_spoiler', false),
+        'hide_mention' => (bool)$settings->get('forumtaro-bbcodes.hide_mention', false),
+        'hide_preview' => (bool)$settings->get('forumtaro-bbcodes.hide_preview', false),
+    ];
+}
+
+// ─── Генерація динамічного CSS для миттєвого приховування кнопок ─────────
+function generateDynamicCss(array $validated): string
+{
+    $css = '';
+    
+    $iconMap = [
+        'hide_bold' => 'fa-bold',
+        'hide_italic' => 'fa-italic',
+        'hide_underline' => 'fa-underline',
+        'hide_link' => 'fa-link',
+        'hide_image' => 'fa-image',
+        'hide_code' => 'fa-code',
+        'hide_quote' => 'fa-quote-left',
+        'hide_strike' => 'fa-strikethrough',
+        'hide_header' => 'fa-heading',
+        'hide_list' => ['fa-list-ul', 'fa-list-ol'],
+        'hide_spoiler' => 'fa-exclamation-triangle',
+        'hide_mention' => 'fa-at',
+        'hide_preview' => 'fa-eye'
+    ];
+    
+    foreach ($validated as $key => $value) {
+        if (strpos($key, 'hide_') === 0 && $value && isset($iconMap[$key])) {
+            $icons = (array)$iconMap[$key];
+            foreach ($icons as $icon) {
+                $css .= ".TextEditor-controls .Button--icon:has(.{$icon}) { display: none !important; }\n";
+            }
+        }
+    }
+    
+    $css .= "\n.TextEditor-controls[data-olleksi-processed] .Button--icon:not([data-olleksi-hidden]) { display: inline-flex !important; }\n";
+    
+    return $css;
+}
+
+// ─── CSS стилі ──────────────────────────────────────────────────────────────
+function getStyles(): string
+{
+    return '
+    .TextEditor-controls .Button--icon {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 36px !important;
+        height: 36px !important;
+        padding: 0 !important;
+        vertical-align: middle !important;
+    }
+    
+    .TextEditor-controls .Button--icon .icon {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: auto !important;
+        height: auto !important;
+        margin: 0 !important;
+        font-size: 16px !important;
+        line-height: 1 !important;
+    }
+    
+    .gallery-modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 99999;
+        justify-content: center;
+        align-items: center;
+    }
+    
+    .gallery-modal-content {
+        background: white;
+        width: 90%;
+        max-width: 1200px;
+        height: 80%;
+        max-height: 800px;
+        border-radius: 10px;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 5px 20px rgba(0,0,0,0.3);
+    }
+    
+    .gallery-modal-header {
+        padding: 15px;
+        border-bottom: 1px solid #ddd;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .gallery-modal-header h3 {
+        margin: 0;
+        font-size: 18px;
+    }
+    
+    .gallery-close {
+        background: none;
+        border: none;
+        font-size: 28px;
+        cursor: pointer;
+        width: 35px;
+        height: 35px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background-color 0.2s;
+    }
+    
+    .gallery-close:hover {
+        background: #f0f0f0;
+    }
+    
+    .gallery-modal-body {
+        flex: 1;
+        overflow: auto;
+        padding: 0;
+        -webkit-overflow-scrolling: touch;
+    }
+    
+    .gallery-modal-body iframe {
+        width: 100%;
+        height: 100%;
+        border: none;
+    }
+    
+    .olleksi-btn-hidden {
+        display: none !important;
+    }
+    
+    @media (max-width: 768px) {
+        .gallery-modal {
+            align-items: flex-end;
+        }
+        .gallery-modal-content {
+            width: 100%;
+            height: 85%;
+            max-height: 85%;
+            border-radius: 15px 15px 0 0;
+        }
+    }';
+}
+
+// ─── JavaScript для форуму ─────────────────────────────────────────────────
+function getForumScript(): string
+{
+    return <<<'JS'
+(function() {
+    'use strict';
+    
+    var config = window.OlleksiBBCodesConfig || {};
+    var galleryModal = null;
+    var observer = null;
+    
+    function debounce(func, wait) {
+        var timeout;
+        return function() {
+            var context = this;
+            var args = arguments;
+            clearTimeout(timeout);
+            timeout = setTimeout(function() {
+                func.apply(context, args);
+            }, wait);
+        };
+    }
+    
+    function insertAtCursor(textarea, open, close) {
+        if (!textarea || textarea.tagName !== 'TEXTAREA') return false;
+        
+        try {
+            var start = textarea.selectionStart;
+            var end = textarea.selectionEnd;
+            var sel = textarea.value.substring(start, end);
             
-            for (var iconClass in hideMap) {
-                if (hideMap[iconClass] && icon.classList.contains(iconClass)) {
-                    button.style.setProperty("display", "none", "important");
-                    button.setAttribute("data-olleksi-hidden", "true");
-                    return;
+            var replacement = open + sel + close;
+            
+            textarea.value = textarea.value.substring(0, start) + 
+                           replacement + 
+                           textarea.value.substring(end);
+            
+            textarea.focus();
+            var newCursorPos = start + open.length + sel.length;
+            textarea.setSelectionRange(newCursorPos, newCursorPos);
+            
+            setTimeout(function() {
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            }, 0);
+            
+            return true;
+        } catch (e) {
+            console.warn('Olleksi BBCodes: Insert failed', e);
+            return false;
+        }
+    }
+    
+    function hideStandardButtons(toolbar) {
+        var hideMap = config.hideMap || {};
+        
+        var hasHides = false;
+        for (var key in hideMap) {
+            if (hideMap[key]) {
+                hasHides = true;
+                break;
+            }
+        }
+        if (!hasHides) return;
+        
+        var buttons = toolbar.querySelectorAll('button, .Button');
+        
+        for (var i = 0; i < buttons.length; i++) {
+            var button = buttons[i];
+            var icons = button.querySelectorAll('.icon, .fas, .far, .fal');
+            
+            for (var j = 0; j < icons.length; j++) {
+                var icon = icons[j];
+                for (var iconClass in hideMap) {
+                    if (hideMap.hasOwnProperty(iconClass) && 
+                        hideMap[iconClass] && 
+                        icon.classList.contains(iconClass)) {
+                        
+                        button.style.display = 'none';
+                        button.setAttribute('data-olleksi-hidden', 'true');
+                        break;
+                    }
                 }
             }
-        });
+        }
     }
-
+    
     function addCustomButtons(toolbar) {
-        if (!toolbar) return;
+        var bbcodes = config.customBbcodes || [];
+        if (bbcodes.length === 0) return;
         
-        customBbcodes.forEach(function(bb) {
-            if (!bb.visible) return;
+        for (var i = 0; i < bbcodes.length; i++) {
+            var bb = bbcodes[i];
+            if (!bb.visible) continue;
             
-            var btnId = "olleksi-custom-btn-" + bb.name.replace(/[^a-zA-Z0-9]/g, "-");
-            if (toolbar.querySelector("#" + btnId)) return;
-
-            var btn = document.createElement("button");
+            var btnId = 'olleksi-custom-btn-' + bb.name.replace(/[^a-zA-Z0-9]/g, '-');
+            if (toolbar.querySelector('#' + btnId)) continue;
+            
+            var btn = document.createElement('button');
             btn.id = btnId;
-            btn.className = "Button Button--icon hasIcon";
+            btn.type = 'button';
+            btn.className = 'Button Button--icon hasIcon';
             btn.title = bb.tooltip || bb.name;
-            btn.type = "button";
-            btn.setAttribute("aria-label", bb.tooltip || bb.name);
-            btn.innerHTML = \'<i class="icon fas \' + bb.icon + \'" aria-hidden="true"></i>\';
+            btn.setAttribute('aria-label', bb.tooltip || bb.name);
+            btn._olleksiData = { open: bb.open, close: bb.close, toolbar: toolbar };
             
-            btn.addEventListener("click", function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                var textarea = toolbar.closest(".TextEditor")?.querySelector("textarea");
-                if (textarea) {
-                    insertAtCursor(textarea, bb.open, bb.close);
-                }
-            });
+            var icon = document.createElement('i');
+            icon.className = 'icon fas ' + bb.icon;
+            icon.setAttribute('aria-hidden', 'true');
+            btn.appendChild(icon);
             
             toolbar.appendChild(btn);
-        });
+        }
     }
-
+    
+    function handleCustomButtonClick(e) {
+        var btn = e.target.closest('button[id^="olleksi-custom-btn-"]');
+        if (!btn || !btn._olleksiData) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        var data = btn._olleksiData;
+        var textarea = data.toolbar.closest('.TextEditor')?.querySelector('textarea');
+        if (textarea) {
+            insertAtCursor(textarea, data.open, data.close);
+        }
+    }
+    
+    function addGalleryButton(toolbar) {
+        if (toolbar.querySelector('#olleksi-gallery-btn')) return;
+        
+        var btn = document.createElement('button');
+        btn.id = 'olleksi-gallery-btn';
+        btn.type = 'button';
+        btn.className = 'Button Button--icon hasIcon';
+        btn.title = 'Галерея Таро';
+        btn.setAttribute('aria-label', 'Галерея Таро');
+        
+        var icon = document.createElement('i');
+        icon.className = 'icon fas fa-images';
+        icon.setAttribute('aria-hidden', 'true');
+        btn.appendChild(icon);
+        
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            showGalleryModal();
+        });
+        
+        if (toolbar.children.length >= 1) {
+            toolbar.insertBefore(btn, toolbar.children[1]);
+        } else {
+            toolbar.appendChild(btn);
+        }
+    }
+    
     function processToolbar(toolbar) {
-        if (!toolbar || toolbar.hasAttribute("data-olleksi-done")) return;
-        toolbar.setAttribute("data-olleksi-done", "true");
+        if (!toolbar || toolbar.hasAttribute('data-olleksi-processed')) return;
         
         hideStandardButtons(toolbar);
         addCustomButtons(toolbar);
-        addGalleryButtonToToolbar(toolbar);
-    }
-
-    function processAllToolbars() {
-        var toolbars = document.querySelectorAll(".TextEditor-controls:not([data-olleksi-done])");
-        toolbars.forEach(processToolbar);
+        addGalleryButton(toolbar);
         
-        document.querySelectorAll(".TextEditor-controls[data-olleksi-done]").forEach(function(toolbar) {
-            var newButtons = toolbar.querySelectorAll("button:not([data-olleksi-hidden]):not([id^=olleksi-custom-btn-]):not(#galleryBtn)");
-            if (newButtons.length > 0) {
-                hideStandardButtons(toolbar);
+        toolbar.setAttribute('data-olleksi-processed', 'true');
+    }
+    
+    function createGalleryModal() {
+        if (galleryModal) return galleryModal;
+        
+        galleryModal = document.createElement('div');
+        galleryModal.id = 'olleksi-gallery-modal';
+        galleryModal.className = 'gallery-modal';
+        galleryModal.setAttribute('role', 'dialog');
+        
+        galleryModal.innerHTML = '<div class="gallery-modal-content">' +
+            '<div class="gallery-modal-header">' +
+            '<h3>📷 Галерея Таро</h3>' +
+            '<button class="gallery-close" id="olleksi-gallery-close" aria-label="Закрити">×</button>' +
+            '</div>' +
+            '<div class="gallery-modal-body">' +
+            '<iframe src="' + (config.galleryUrl || '/gallery') + '" ' +
+            'sandbox="allow-scripts allow-same-origin" ' +
+            'loading="lazy" ' +
+            'title="Галерея Таро"></iframe>' +
+            '</div></div>';
+        
+        document.body.appendChild(galleryModal);
+        
+        var closeBtn = galleryModal.querySelector('#olleksi-gallery-close');
+        closeBtn.addEventListener('click', hideGalleryModal);
+        
+        galleryModal.addEventListener('click', function(e) {
+            if (e.target === galleryModal) {
+                hideGalleryModal();
             }
         });
+        
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && galleryModal.style.display === 'flex') {
+                hideGalleryModal();
+            }
+        });
+        
+        return galleryModal;
     }
-
-    // ─── Галерея Таро ─────────────────────────────────────────
-    var galleryModal = null;
-
+    
+    function showGalleryModal() {
+        var modal = createGalleryModal();
+        modal.style.display = 'flex';
+    }
+    
+    function hideGalleryModal() {
+        if (galleryModal) {
+            galleryModal.style.display = 'none';
+        }
+    }
+    
     window.insertToEditor = function(code) {
-        var textarea = document.querySelector("textarea.FormControl.Composer-flexible.TextEditor-editor");
+        if (!code || typeof code !== 'string' || code.length > 500) return;
+        
+        var textarea = document.querySelector('textarea.FormControl.Composer-flexible.TextEditor-editor');
         if (textarea) {
-            var start = textarea.selectionStart;
-            var end = textarea.selectionEnd;
-            var value = textarea.value;
-            textarea.value = value.substring(0, start) + code + value.substring(end);
-            textarea.setSelectionRange(start + code.length, start + code.length);
-            textarea.focus();
-            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            insertAtCursor(textarea, code, '');
         }
     };
-
-    window.showGalleryModal = function() {
-        if (!galleryModal) {
-            galleryModal = document.createElement("div");
-            galleryModal.id = "galleryModal";
-            galleryModal.className = "gallery-modal";
-            galleryModal.innerHTML = \'<div class="gallery-modal-content">\' +
-                \'<div class="gallery-modal-header">\' +
-                \'<h3>📷 Галерея Таро</h3>\' +
-                \'<button class="gallery-close" id="galleryModalClose">×</button>\' +
-                \'</div>\' +
-                \'<div class="gallery-modal-body">\' +
-                \'<iframe src="https://test.tarot.pp.ua/0/gallery.html" style="width:100%;height:100%;border:none;"></iframe>\' +
-                \'</div>\' +
-                \'</div>\';
-            document.body.appendChild(galleryModal);
-            
-            document.getElementById("galleryModalClose").onclick = function() {
-                galleryModal.style.display = "none";
-            };
-            galleryModal.onclick = function(e) {
-                if (e.target === galleryModal) galleryModal.style.display = "none";
-            };
-        }
-        galleryModal.style.display = "flex";
-    };
-
-    window.addEventListener("message", function(event) {
-        if (event.data && event.data.type === "insertCard") {
-            window.insertToEditor(event.data.bbcode);
-            if (galleryModal) galleryModal.style.display = "none";
+    
+    window.addEventListener('message', function(event) {
+        if (!event.data || typeof event.data !== 'object') return;
+        
+        if (event.data.type === 'insertCard' && event.data.bbcode) {
+            var bbcode = String(event.data.bbcode).trim();
+            if (bbcode.length > 0 && bbcode.length < 500) {
+                window.insertToEditor(bbcode);
+                hideGalleryModal();
+            }
         }
     });
-
-    function addGalleryButtonToToolbar(toolbar) {
-        if (!toolbar || toolbar.querySelector("#galleryBtn")) return;
+    
+    function setupMutationObserver() {
+        if (observer) return;
         
-        var btn = document.createElement("button");
-        btn.id = "galleryBtn";
-        btn.className = "Button Button--icon hasIcon";
-        btn.title = "Галерея Таро";
-        btn.type = "button";
-        btn.setAttribute("aria-label", "Галерея Таро");
-        btn.innerHTML = \'<i class="icon fas fa-images" aria-hidden="true"></i>\';
-        btn.onclick = function(e) {
-            e.preventDefault();
-            window.showGalleryModal();
-        };
-        toolbar.appendChild(btn);
-    }
-    // ─── Кінець галереї ─────────────────────────────────────
-
-    setTimeout(processAllToolbars, 100);
-
-    var observer = new MutationObserver(function(mutations) {
-        var shouldCheck = false;
-        
-        mutations.forEach(function(mutation) {
-            mutation.addedNodes.forEach(function(node) {
-                if (node.nodeType === 1) {
-                    if (node.classList && node.classList.contains("TextEditor-controls")) {
-                        shouldCheck = true;
-                    }
-                    if (node.querySelectorAll) {
-                        if (node.querySelectorAll(".TextEditor-controls").length > 0) {
-                            shouldCheck = true;
-                        }
-                        if (node.querySelectorAll(".Button, button").length > 0) {
-                            shouldCheck = true;
+        observer = new MutationObserver(function(mutations) {
+            for (var i = 0; i < mutations.length; i++) {
+                var mutation = mutations[i];
+                if (mutation.addedNodes.length) {
+                    for (var j = 0; j < mutation.addedNodes.length; j++) {
+                        var node = mutation.addedNodes[j];
+                        if (node.nodeType === 1) {
+                            if (node.classList && node.classList.contains('TextEditor-controls')) {
+                                processToolbar(node);
+                            }
+                            if (node.querySelectorAll) {
+                                var toolbars = node.querySelectorAll('.TextEditor-controls:not([data-olleksi-processed])');
+                                for (var k = 0; k < toolbars.length; k++) {
+                                    processToolbar(toolbars[k]);
+                                }
+                            }
                         }
                     }
                 }
-            });
-            
-            if (mutation.target.classList && mutation.target.classList.contains("TextEditor-controls")) {
-                shouldCheck = true;
             }
         });
         
-        if (shouldCheck) {
-            setTimeout(processAllToolbars, 50);
-        }
-    });
-
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["class", "style"]
-    });
-
-    setInterval(function() {
-        var unprocessed = document.querySelectorAll(".TextEditor-controls:not([data-olleksi-done])");
-        if (unprocessed.length > 0) {
-            processAllToolbars();
-        }
-        
-        document.querySelectorAll(".TextEditor-controls[data-olleksi-done]").forEach(function(tb) {
-            if (tb.offsetParent === null) {
-                tb.removeAttribute("data-olleksi-done");
-            }
+        var target = document.getElementById('composer') || document.body;
+        observer.observe(target, {
+            childList: true,
+            subtree: true
         });
-    }, 200);
-
-    document.addEventListener("click", function(e) {
-        var target = e.target;
-        if (target.closest(".Button--primary, .Post-edit, .Post-comment, .Button--link, .Post-quoteButton")) {
-            setTimeout(processAllToolbars, 100);
-            setTimeout(processAllToolbars, 300);
-            setTimeout(processAllToolbars, 500);
-        }
-    }, true);
-
-    document.addEventListener("flarum:loaded", function() {
-        setTimeout(processAllToolbars, 100);
-        setTimeout(processAllToolbars, 300);
-        setTimeout(processAllToolbars, 500);
-    });
+    }
     
-    document.addEventListener("flarum:modal-opened", function() {
-        setTimeout(processAllToolbars, 200);
-    });
-};
-
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function() {
-        setTimeout(window.olleksiHomepageInit, 200);
-    });
-} else {
-    setTimeout(window.olleksiHomepageInit, 200);
+    function setupEventListeners() {
+        document.addEventListener('click', handleCustomButtonClick, true);
+        
+        var debouncedProcess = debounce(function() {
+            var toolbars = document.querySelectorAll('.TextEditor-controls:not([data-olleksi-processed])');
+            for (var i = 0; i < toolbars.length; i++) {
+                processToolbar(toolbars[i]);
+            }
+        }, 150);
+        
+        document.addEventListener('click', function(e) {
+            var target = e.target.closest('.Button--primary, .Post-edit, .Post-comment, .Button--link, .Post-quoteButton');
+            if (target) {
+                setTimeout(debouncedProcess, 100);
+            }
+        });
+        
+        document.addEventListener('flarum:loaded', debouncedProcess);
+        document.addEventListener('flarum:modal-opened', debouncedProcess);
+    }
+    
+    function init() {
+        var existingToolbars = document.querySelectorAll('.TextEditor-controls:not([data-olleksi-processed])');
+        for (var i = 0; i < existingToolbars.length; i++) {
+            processToolbar(existingToolbars[i]);
+        }
+        
+        setupMutationObserver();
+        setupEventListeners();
+        
+        if (config.debug) {
+            console.log('Olleksi BBCodes: Initialized');
+        }
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+JS;
 }
 
-window.addEventListener("load", function() {
-    setTimeout(window.olleksiHomepageInit, 500);
-});
-</script>';
+// ─── JavaScript для адмін панелі ────────────────────────────────────────────
+function getAdminScript(string $initialBbcodes): string
+{
+    return <<<JS
+(function() {
+    'use strict';
+    
+    var initAttempts = 0;
+    var maxAttempts = 10;
+    var bbcodes = [];
+    var isSaving = false;
+    
+    function tryInit() {
+        if (initAttempts >= maxAttempts) return;
+        initAttempts++;
+        
+        if (!window.app || !window.app.extensionData) {
+            setTimeout(tryInit, 500);
+            return;
+        }
+        
+        try {
+            initializeExtension();
+        } catch(e) {
+            console.error('BBCodes admin init error:', e);
+            setTimeout(tryInit, 1000);
+        }
+    }
+    
+    function initializeExtension() {
+        app.extensionData.for('forumtaro-bbcodes')
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_bold',      type: 'boolean', label: 'Приховати жирний (bold)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_italic',    type: 'boolean', label: 'Приховати курсив (italic)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_underline', type: 'boolean', label: 'Приховати підкреслення (underline)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_link',      type: 'boolean', label: 'Приховати посилання (link)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_image',     type: 'boolean', label: 'Приховати зображення (image)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_code',      type: 'boolean', label: 'Приховати код (code)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_quote',     type: 'boolean', label: 'Приховати цитату (quote)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_strike',    type: 'boolean', label: 'Приховати закреслення (strike)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_header',    type: 'boolean', label: 'Приховати заголовок (header)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_list',      type: 'boolean', label: 'Приховати списки (list)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_spoiler',   type: 'boolean', label: 'Приховати спойлер (spoiler)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_mention',   type: 'boolean', label: 'Приховати згадування (mention)' })
+            .registerSetting({ setting: 'forumtaro-bbcodes.hide_preview',   type: 'boolean', label: 'Приховати попередній перегляд (preview)' });
+
+        var initialData = {$initialBbcodes};
+        bbcodes = Array.isArray(initialData) ? JSON.parse(JSON.stringify(initialData)) : [];
+        
+        startUIInitialization();
+    }
+    
+    function save(successMsg) {
+        if (isSaving) return;
+        isSaving = true;
+        
+        var saveBtn = document.getElementById('olleksi-save-btn');
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Збереження...';
+        }
+        
+        app.request({
+            method: 'POST',
+            url: app.forum.attribute('apiUrl') + '/forumtaro-bbcodes',
+            body: { bbcodes: bbcodes }
+        }).then(function(data) {
+            if (data.success && data.bbcodes) {
+                bbcodes = data.bbcodes;
+                render();
+                showMsg(successMsg || 'Збережено!', false);
+            } else {
+                showMsg('Помилка: неочікувана відповідь сервера', true);
+            }
+        }).catch(function(err) {
+            console.error('BBCodes save error:', err);
+            showMsg('Помилка збереження: ' + (err.message || 'Невідома помилка'), true);
+        }).finally(function() {
+            isSaving = false;
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Зберегти';
+            }
+        });
+    }
+    
+    function showMsg(text, isErr) {
+        var el = document.getElementById('olleksi-msg');
+        if (!el) return;
+        el.textContent = text;
+        el.style.color = isErr ? '#c0392b' : '#27ae60';
+        el.style.display = 'block';
+        
+        setTimeout(function() {
+            el.style.display = 'none';
+        }, 3000);
+    }
+    
+    function escHtml(s) {
+        if (!s) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+    
+    function render() {
+        var wrap = document.getElementById('olleksi-bbcode-list');
+        if (!wrap) return;
+        
+        if (bbcodes.length === 0) {
+            wrap.innerHTML = '<p style="color:#999;font-size:13px;padding:12px">Немає кастомних BB-кодів. Додайте новий код нижче.</p>';
+            return;
+        }
+        
+        var rows = bbcodes.map(function(bb, i) {
+            var visibilityBtn = bb.visible ? 
+                '<button class="Button Button--primary" style="font-size:11px;padding:2px 8px" data-action="toggle" data-index="' + i + '">👁 Видно</button>' :
+                '<button class="Button" style="font-size:11px;padding:2px 8px" data-action="toggle" data-index="' + i + '">🚫 Прих.</button>';
+            
+            return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #eee;">' +
+                '<i class="fas ' + escHtml(bb.icon) + '" style="width:20px;text-align:center;color:#555"></i>' +
+                '<span style="flex:1;font-size:13px;font-weight:500">' + escHtml(bb.name) + '</span>' +
+                '<span style="font-size:11px;color:#888;flex:2">' + escHtml(bb.tooltip) + '</span>' +
+                '<span style="font-size:10px;color:#aaa;font-family:monospace;flex:2">' + escHtml(bb.open) + ' ... ' + escHtml(bb.close) + '</span>' +
+                '<button class="Button Button--primary" style="font-size:11px;padding:2px 8px" data-action="edit" data-index="' + i + '">Ред.</button>' +
+                visibilityBtn +
+                '<button class="Button Button--danger" style="font-size:11px;padding:2px 8px" data-action="delete" data-index="' + i + '">X</button>' +
+            '</div>';
+        }).join('');
+        
+        wrap.innerHTML = rows;
+    }
+    
+    function resetForm() {
+        document.getElementById('olleksi-f-idx').value = '-1';
+        document.getElementById('olleksi-f-name').value = '';
+        document.getElementById('olleksi-f-icon').value = '';
+        document.getElementById('olleksi-f-tooltip').value = '';
+        document.getElementById('olleksi-f-open').value = '';
+        document.getElementById('olleksi-f-close').value = '';
+        document.getElementById('olleksi-form-title').textContent = 'Новий BB-код';
+    }
+    
+    function createUI(container) {
+        if (document.getElementById('olleksi-bbcode-content')) return;
+        
+        var ui = document.createElement('div');
+        ui.id = 'olleksi-bbcode-content';
+        ui.innerHTML = '' + 
+            '<div style="margin-top:24px;border-top:2px solid #e0e0e0;padding-top:16px">' +
+            '<h3 style="font-size:15px;font-weight:600;margin-bottom:12px">Кастомні BB-коди</h3>' +
+            '<p id="olleksi-msg" style="display:none;font-size:13px;margin-bottom:8px"></p>' +
+            '<div id="olleksi-bbcode-list" style="margin-bottom:16px"></div>' +
+            '<div style="background:#f8f8f8;border-radius:6px;padding:14px">' +
+            '<p id="olleksi-form-title" style="font-size:14px;font-weight:600;margin-bottom:10px">Новий BB-код</p>' +
+            '<input type="hidden" id="olleksi-f-idx" value="-1">' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">' +
+            '<div><label style="font-size:12px;color:#555">Назва кнопки</label>' +
+            '<input id="olleksi-f-name" class="FormControl" placeholder="напр. Спойлер" style="width:100%" maxlength="32"></div>' +
+            '<div><label style="font-size:12px;color:#555">FA іконка</label>' +
+            '<input id="olleksi-f-icon" class="FormControl" placeholder="fa-star" style="width:100%" maxlength="32"></div>' +
+            '</div>' +
+            '<div style="margin-bottom:8px"><label style="font-size:12px;color:#555">Підказка (tooltip)</label>' +
+            '<input id="olleksi-f-tooltip" class="FormControl" placeholder="Текст при наведенні" style="width:100%" maxlength="64"></div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">' +
+            '<div><label style="font-size:12px;color:#555">Відкриваючий тег</label>' +
+            '<input id="olleksi-f-open" class="FormControl" placeholder="[spoiler]" style="width:100%" maxlength="128"></div>' +
+            '<div><label style="font-size:12px;color:#555">Закриваючий тег</label>' +
+            '<input id="olleksi-f-close" class="FormControl" placeholder="[/spoiler]" style="width:100%" maxlength="128"></div>' +
+            '</div>' +
+            '<div style="display:flex;gap:8px">' +
+            '<button class="Button Button--primary" id="olleksi-save-btn">Зберегти</button>' +
+            '<button class="Button" id="olleksi-reset-btn">Скинути форму</button>' +
+            '</div>' +
+            '</div></div>';
+        
+        container.appendChild(ui);
+        
+        var list = document.getElementById('olleksi-bbcode-list');
+        list.addEventListener('click', function(e) {
+            var target = e.target.closest('[data-action]');
+            if (!target) return;
+            
+            var action = target.dataset.action;
+            var index = parseInt(target.dataset.index);
+            
+            if (isNaN(index) || index < 0 || index >= bbcodes.length) return;
+            
+            if (action === 'edit') {
+                var bb = bbcodes[index];
+                document.getElementById('olleksi-f-name').value = bb.name;
+                document.getElementById('olleksi-f-icon').value = bb.icon;
+                document.getElementById('olleksi-f-tooltip').value = bb.tooltip;
+                document.getElementById('olleksi-f-open').value = bb.open;
+                document.getElementById('olleksi-f-close').value = bb.close;
+                document.getElementById('olleksi-f-idx').value = index;
+                document.getElementById('olleksi-form-title').textContent = 'Редагувати BB-код';
+            } else if (action === 'toggle') {
+                bbcodes[index].visible = !bbcodes[index].visible;
+                save('Видимість змінено');
+            } else if (action === 'delete') {
+                if (confirm('Видалити "' + bbcodes[index].name + '"?')) {
+                    bbcodes.splice(index, 1);
+                    save('Видалено');
+                    resetForm();
+                }
+            }
+        });
+        
+        document.getElementById('olleksi-save-btn').addEventListener('click', function() {
+            var idx = parseInt(document.getElementById('olleksi-f-idx').value);
+            var name = document.getElementById('olleksi-f-name').value.trim();
+            var icon = document.getElementById('olleksi-f-icon').value.trim() || 'fa-star';
+            var tooltip = document.getElementById('olleksi-f-tooltip').value.trim();
+            var open = document.getElementById('olleksi-f-open').value;
+            var close = document.getElementById('olleksi-f-close').value;
+            
+            if (!name) { 
+                showMsg('Вкажіть назву кнопки', true); 
+                return; 
+            }
+            
+            var entry = { 
+                name: name, 
+                icon: icon, 
+                tooltip: tooltip, 
+                open: open, 
+                close: close, 
+                visible: true 
+            };
+            
+            if (idx >= 0 && idx < bbcodes.length) {
+                entry.visible = bbcodes[idx].visible;
+                bbcodes[idx] = entry;
+            } else {
+                bbcodes.push(entry);
+            }
+            
+            save('Збережено!');
+            resetForm();
+        });
+        
+        document.getElementById('olleksi-reset-btn').addEventListener('click', resetForm);
+        
+        render();
+    }
+    
+    function findAndCreateUI() {
+        var forms = document.querySelectorAll('.Form, .ExtensionPage-settings');
+        if (forms.length === 0) return false;
+        
+        var container = forms[forms.length - 1];
+        createUI(container);
+        return true;
+    }
+    
+    function startUIInitialization() {
+        setTimeout(function() {
+            if (!findAndCreateUI()) {
+                setTimeout(findAndCreateUI, 300);
+                setTimeout(findAndCreateUI, 600);
+                setTimeout(findAndCreateUI, 1000);
+            }
+        }, 300);
+    }
+    
+    setTimeout(tryInit, 500);
+})();
+JS;
+}
+
+// ─── Основний екстеншн ──────────────────────────────────────────────────────
+return [
+    (new Extend\Routes('api'))
+        ->post('/forumtaro-bbcodes', 'forumtaro.bbcodes.save', SaveBbcodesHandler::class),
+
+    (new Extend\Frontend('forum'))
+        ->content(function (\Flarum\Frontend\Document $document) {
+            $settings = resolve(SettingsRepositoryInterface::class);
+            $validated = getValidatedSettings($settings);
+            
+            $config = [
+                'hideMap' => [
+                    'fa-bold' => $validated['hide_bold'],
+                    'fa-italic' => $validated['hide_italic'],
+                    'fa-underline' => $validated['hide_underline'],
+                    'fa-link' => $validated['hide_link'],
+                    'fa-image' => $validated['hide_image'],
+                    'fa-code' => $validated['hide_code'],
+                    'fa-quote-left' => $validated['hide_quote'],
+                    'fa-strikethrough' => $validated['hide_strike'],
+                    'fa-heading' => $validated['hide_header'],
+                    'fa-list-ul' => $validated['hide_list'],
+                    'fa-list-ol' => $validated['hide_list'],
+                    'fa-exclamation-triangle' => $validated['hide_spoiler'],
+                    'fa-at' => $validated['hide_mention'],
+                    'fa-eye' => $validated['hide_preview']
+                ],
+                'customBbcodes' => $validated['custom_bbcodes'],
+                'galleryUrl' => '/gallery',
+                'debug' => false
+            ];
+            
+            $configJson = json_encode($config, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE);
+            
+            $dynamicCss = generateDynamicCss($validated);
+            $document->head[] = "<style>" . getStyles() . "\n" . $dynamicCss . "</style>";
+
+            $document->foot[] = "<script>
+window.OlleksiBBCodesConfig = {$configJson};
+" . getForumScript() . "
+</script>";
         }),
 
-    // ─── Адмін панель ────────────────────────────────────────────────────────
     (new Extend\Frontend('admin'))
         ->content(function (\Flarum\Frontend\Document $document) {
             $settings = resolve(SettingsRepositoryInterface::class);
-            $customBbcodesJson = $settings->get('forumtaro-bbcodes.custom_bbcodes', '[]');
-            $customBbcodes = json_encode(json_decode($customBbcodesJson, true) ?: []);
-
-            $document->head[] = '<script>
-window.addEventListener("load", function() {
-    setTimeout(function() {
-        if (!window.app || !window.app.extensionData) return;
-
-        try {
-            app.extensionData.for("forumtaro-bbcodes")
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_bold",      type: "boolean", label: "Приховати жирний (bold)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_italic",    type: "boolean", label: "Приховати курсив (italic)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_underline", type: "boolean", label: "Приховати підкреслення (underline)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_link",      type: "boolean", label: "Приховати посилання (link)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_image",     type: "boolean", label: "Приховати зображення (image)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_code",      type: "boolean", label: "Приховати код (code)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_quote",     type: "boolean", label: "Приховати цитату (quote)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_strike",    type: "boolean", label: "Приховати закреслення (strike)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_header",    type: "boolean", label: "Приховати заголовок (header)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_list",      type: "boolean", label: "Приховати списки (list)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_spoiler",   type: "boolean", label: "Приховати спойлер (spoiler)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_mention",   type: "boolean", label: "Приховати згадування (mention)" })
-                .registerSetting({ setting: "forumtaro-bbcodes.hide_preview",   type: "boolean", label: "Приховати попередній перегляд (preview)" });
-
-            var initialBbcodes = ' . $customBbcodes . ';
-            var bbcodes = JSON.parse(JSON.stringify(initialBbcodes));
-
-            function save(successMsg) {
-                app.request({
-                    method: "POST",
-                    url: app.forum.attribute("apiUrl") + "/forumtaro-bbcodes",
-                    body: { bbcodes: bbcodes }
-                }).then(function(data){
-                    bbcodes = data.bbcodes;
-                    render();
-                    showMsg(successMsg || "Збережено!", false);
-                }).catch(function(err){
-                    console.error("Save error:", err);
-                    showMsg("Помилка збереження: " + (err.message || "Невідома помилка"), true);
-                });
-            }
-
-            function showMsg(text, isErr) {
-                var el = document.getElementById("olleksi-msg");
-                if (!el) return;
-                el.textContent = text;
-                el.style.color = isErr ? "#c0392b" : "#27ae60";
-                el.style.display = "block";
-                setTimeout(function(){ el.style.display = "none"; }, 3000);
-            }
-
-            function escHtml(s) {
-                return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-            }
-
-            function render() {
-                var wrap = document.getElementById("olleksi-bbcode-list");
-                if (!wrap) return;
-
-                var rows = bbcodes.map(function(bb, i) {
-                    return "<div style=\"display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee\">" +
-                        "<i class=\"fas " + escHtml(bb.icon) + "\" style=\"width:20px;text-align:center\"></i>" +
-                        "<span style=\"flex:1;font-size:13px\">" + escHtml(bb.name) + "</span>" +
-                        "<span style=\"font-size:11px;color:#888;flex:2\">" + escHtml(bb.tooltip) + "</span>" +
-                        "<button class=\"Button Button--primary\" style=\"font-size:11px;padding:2px 8px\" onclick=\"olleksiEdit(" + i + ")\">Ред.</button>" +
-                        "<button class=\"Button\" style=\"font-size:11px;padding:2px 8px\" onclick=\"olleksiToggle(" + i + ")\">" + (bb.visible ? "Видно" : "Прих.") + "</button>" +
-                        "<button class=\"Button Button--danger\" style=\"font-size:11px;padding:2px 8px\" onclick=\"olleksiDelete(" + i + ")\">X</button>" +
-                    "</div>";
-                }).join("");
-
-                wrap.innerHTML = rows || "<p style=\"color:#999;font-size:13px\">Немає кастомних BB-кодів</p>";
-            }
-
-            window.olleksiEdit = function(i) {
-                var bb = bbcodes[i];
-                document.getElementById("olleksi-f-name").value    = bb.name;
-                document.getElementById("olleksi-f-icon").value    = bb.icon;
-                document.getElementById("olleksi-f-tooltip").value = bb.tooltip;
-                document.getElementById("olleksi-f-open").value    = bb.open;
-                document.getElementById("olleksi-f-close").value   = bb.close;
-                document.getElementById("olleksi-f-idx").value     = i;
-                document.getElementById("olleksi-form-title").textContent = "Редагувати BB-код";
-            };
-
-            window.olleksiToggle = function(i) {
-                bbcodes[i].visible = !bbcodes[i].visible;
-                save("Видимість змінено");
-            };
-
-            window.olleksiDelete = function(i) {
-                if (!confirm("Видалити \"" + bbcodes[i].name + "\"?")) return;
-                bbcodes.splice(i, 1);
-                save("Видалено");
-            };
-
-            var checkInterval = setInterval(function() {
-                var settingsSection = document.querySelector(".ExtensionPage-settings");
-                if (!settingsSection) return;
-                if (document.getElementById("olleksi-bbcode-ui")) { clearInterval(checkInterval); return; }
-
-                clearInterval(checkInterval);
-
-                var ui = document.createElement("div");
-                ui.id = "olleksi-bbcode-ui";
-                ui.innerHTML = [
-                    "<div style=\"margin-top:24px;border-top:2px solid #e0e0e0;padding-top:16px\">",
-                    "<h3 style=\"font-size:15px;font-weight:600;margin-bottom:12px\">Кастомні BB-коди</h3>",
-                    "<p id=\"olleksi-msg\" style=\"display:none;font-size:13px;margin-bottom:8px\"></p>",
-                    "<div id=\"olleksi-bbcode-list\" style=\"margin-bottom:16px\"></div>",
-                    "<div style=\"background:#f8f8f8;border-radius:6px;padding:14px\">",
-                    "<p id=\"olleksi-form-title\" style=\"font-size:14px;font-weight:600;margin-bottom:10px\">Новий BB-код</p>",
-                    "<input type=\"hidden\" id=\"olleksi-f-idx\" value=\"-1\">",
-                    "<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px\">",
-                    "<div><label style=\"font-size:12px;color:#555\">Назва кнопки</label>",
-                    "<input id=\"olleksi-f-name\" class=\"FormControl\" placeholder=\"напр. Спойлер\" style=\"width:100%\"></div>",
-                    "<div><label style=\"font-size:12px;color:#555\">FA іконка</label>",
-                    "<input id=\"olleksi-f-icon\" class=\"FormControl\" placeholder=\"fa-star\" style=\"width:100%\"></div>",
-                    "</div>",
-                    "<div style=\"margin-bottom:8px\"><label style=\"font-size:12px;color:#555\">Підказка (tooltip)</label>",
-                    "<input id=\"olleksi-f-tooltip\" class=\"FormControl\" placeholder=\"Текст при наведенні\" style=\"width:100%\"></div>",
-                    "<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px\">",
-                    "<div><label style=\"font-size:12px;color:#555\">Відкриваючий тег</label>",
-                    "<input id=\"olleksi-f-open\" class=\"FormControl\" placeholder=\"[spoiler]\" style=\"width:100%\"></div>",
-                    "<div><label style=\"font-size:12px;color:#555\">Закриваючий тег</label>",
-                    "<input id=\"olleksi-f-close\" class=\"FormControl\" placeholder=\"[/spoiler]\" style=\"width:100%\"></div>",
-                    "</div>",
-                    "<div style=\"display:flex;gap:8px\">",
-                    "<button class=\"Button Button--primary\" id=\"olleksi-save-btn\">Зберегти</button>",
-                    "<button class=\"Button\" id=\"olleksi-reset-btn\">Скинути форму</button>",
-                    "</div>",
-                    "</div></div>"
-                ].join("");
-
-                settingsSection.appendChild(ui);
-                render();
-
-                document.getElementById("olleksi-save-btn").addEventListener("click", function() {
-                    var idx     = parseInt(document.getElementById("olleksi-f-idx").value);
-                    var name    = document.getElementById("olleksi-f-name").value.trim();
-                    var icon    = document.getElementById("olleksi-f-icon").value.trim() || "fa-star";
-                    var tooltip = document.getElementById("olleksi-f-tooltip").value.trim();
-                    var open    = document.getElementById("olleksi-f-open").value;
-                    var close   = document.getElementById("olleksi-f-close").value;
-
-                    if (!name) { showMsg("Вкажіть назву кнопки", true); return; }
-
-                    var entry = { name: name, icon: icon, tooltip: tooltip, open: open, close: close, visible: true };
-
-                    if (idx >= 0 && idx < bbcodes.length) {
-                        entry.visible = bbcodes[idx].visible;
-                        bbcodes[idx] = entry;
-                    } else {
-                        bbcodes.push(entry);
-                    }
-
-                    save("Збережено!");
-                    document.getElementById("olleksi-reset-btn").click();
-                });
-
-                document.getElementById("olleksi-reset-btn").addEventListener("click", function() {
-                    document.getElementById("olleksi-f-idx").value = "-1";
-                    document.getElementById("olleksi-f-name").value = "";
-                    document.getElementById("olleksi-f-icon").value = "";
-                    document.getElementById("olleksi-f-tooltip").value = "";
-                    document.getElementById("olleksi-f-open").value = "";
-                    document.getElementById("olleksi-f-close").value = "";
-                    document.getElementById("olleksi-form-title").textContent = "Новий BB-код";
-                });
-
-            }, 300);
-
-            if (window.m && window.m.redraw) window.m.redraw();
-
-        } catch(e) { console.error("BBCodes admin error:", e); }
-    }, 2000);
-});
-</script>';
+            $validated = getValidatedSettings($settings);
+            
+            $initialBbcodes = json_encode($validated['custom_bbcodes'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE);
+            
+            $document->foot[] = "<script>" . getAdminScript($initialBbcodes) . "</script>";
         }),
 
-    // ─── Settings defaults ────────────────────────────────────────────────────
     (new Extend\Settings())
         ->default('forumtaro-bbcodes.hide_bold', false)
         ->default('forumtaro-bbcodes.hide_italic', false)
