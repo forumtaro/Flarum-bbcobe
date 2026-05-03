@@ -246,7 +246,7 @@ function getStyles(): string
         max-width: 1200px;
         height: 80%;
         max-height: 800px;
-        border-radius: 10px;
+        border-radius: 20px;
         display: flex;
         flex-direction: column;
         box-shadow: 0 5px 20px rgba(0,0,0,0.3);
@@ -264,6 +264,31 @@ function getStyles(): string
         margin: 0;
         font-size: 18px;
     }
+    
+    
+    
+    .gallery-close-btn {
+    background: #e4e8f6;
+    color: #667199;
+    border: none;
+    padding: 10px 25px;
+    border-radius: 25px;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-family: Georgia, serif;
+} 
+    
+    .gallery-modal-footer {
+    padding: 10px 20px;
+    border-top: 1px solid #eee;
+    display: flex;
+    justify-content: center; /* Центрує кнопку по горизонталі */
+    align-items: center;     /* Центрує кнопку по вертикалі */
+    background: #f8f8f8;
+}
+    
+    
     
     .gallery-close {
         background: none;
@@ -285,12 +310,13 @@ function getStyles(): string
     
     .gallery-modal-body {
         flex: 1;
-        overflow: auto;
+        
         padding: 0;
         -webkit-overflow-scrolling: touch;
     }
     
     .gallery-modal-body iframe {
+        border-radius: 20px;
         width: 100%;
         height: 100%;
         border: none;
@@ -337,33 +363,45 @@ function getForumScript(): string
     }
     
     function insertAtCursor(textarea, open, close) {
-        if (!textarea || textarea.tagName !== 'TEXTAREA') return false;
+    if (!textarea || textarea.tagName !== 'TEXTAREA') return false;
+    
+    try {
+        // Зберігаємо поточну позицію прокрутки
+        var scrollTop = textarea.scrollTop;
         
-        try {
-            var start = textarea.selectionStart;
-            var end = textarea.selectionEnd;
-            var sel = textarea.value.substring(start, end);
-            
-            var replacement = open + sel + close;
-            
-            textarea.value = textarea.value.substring(0, start) + 
-                           replacement + 
-                           textarea.value.substring(end);
-            
-            textarea.focus();
-            var newCursorPos = start + open.length + sel.length;
-            textarea.setSelectionRange(newCursorPos, newCursorPos);
-            
-            setTimeout(function() {
-                textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            }, 0);
-            
-            return true;
-        } catch (e) {
-            console.warn('Olleksi BBCodes: Insert failed', e);
-            return false;
-        }
+        var start = textarea.selectionStart;
+        var end = textarea.selectionEnd;
+        var sel = textarea.value.substring(start, end);
+        
+        var replacement = open + sel + close;
+        
+        textarea.value = textarea.value.substring(0, start) + 
+                       replacement + 
+                       textarea.value.substring(end);
+        
+        // Відновлюємо позицію прокрутки перед focus
+        textarea.scrollTop = scrollTop;
+        
+        textarea.focus({ preventScroll: true });
+        
+        var newCursorPos = start + open.length + sel.length;
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+        
+        // Знову відновлюємо позицію прокрутки після setSelectionRange
+        textarea.scrollTop = scrollTop;
+        
+        setTimeout(function() {
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            // Фінальне відновлення прокрутки
+            textarea.scrollTop = scrollTop;
+        }, 0);
+        
+        return true;
+    } catch (e) {
+        console.warn('Olleksi BBCodes: Insert failed', e);
+        return false;
     }
+}
     
     function hideStandardButtons(toolbar) {
         var hideMap = config.hideMap || {};
@@ -488,16 +526,17 @@ function getForumScript(): string
         galleryModal.setAttribute('role', 'dialog');
         
         galleryModal.innerHTML = '<div class="gallery-modal-content">' +
-            '<div class="gallery-modal-header">' +
-            '<h3>📷 Галерея Таро</h3>' +
-            '<button class="gallery-close" id="olleksi-gallery-close" aria-label="Закрити">×</button>' +
-            '</div>' +
-            '<div class="gallery-modal-body">' +
-            '<iframe src="' + (config.galleryUrl || '/gallery') + '" ' +
-            'sandbox="allow-scripts allow-same-origin" ' +
-            'loading="lazy" ' +
-            'title="Галерея Таро"></iframe>' +
-            '</div></div>';
+    '<div class="gallery-modal-body">' +
+    '<iframe src="' + (config.galleryUrl || '/gallery') + '" ' +
+    'sandbox="allow-scripts allow-same-origin" ' +
+    'loading="lazy" ' +
+    'title="Галерея Таро"></iframe>' +
+    '</div>' +
+    '<div class="gallery-modal-footer">' +
+    '<button class="gallery-close-btn" id="olleksi-gallery-close" aria-label="Згорнути">' +
+    'Згорнути галерею' +
+    '</button>' +
+    '</div></div>';
         
         document.body.appendChild(galleryModal);
         
@@ -876,9 +915,68 @@ function getAdminScript(string $initialBbcodes): string
         render();
     }
     
+    function isBBcodesExtensionPage() {
+        // Перевіряємо URL сторінки
+        var currentUrl = window.location.href;
+        if (currentUrl.indexOf('/admin/extension/forumtaro-bbcodes') !== -1) {
+            return true;
+        }
+        
+        // Перевіряємо наявність специфічних елементів розширення BBCodes
+        var extensionId = 'forumtaro-bbcodes';
+        
+        // Перевіряємо через data-атрибути або класи, специфічні для нашої сторінки
+        var extensionHeader = document.querySelector('.ExtensionPage h2, .ExtensionPage h3');
+        if (extensionHeader) {
+            var headerText = extensionHeader.textContent || extensionHeader.innerText;
+            if (headerText.toLowerCase().indexOf('bbcodes') !== -1 || 
+                headerText.toLowerCase().indexOf('bb-codes') !== -1) {
+                return true;
+            }
+        }
+        
+        // Перевіряємо через активне меню або навігацію
+        var activeMenuItem = document.querySelector('.ExtensionNav-item.active, .ExtensionNav-link.active');
+        if (activeMenuItem) {
+            var menuText = activeMenuItem.textContent || activeMenuItem.innerText;
+            if (menuText.toLowerCase().indexOf('bbcodes') !== -1 || 
+                menuText.toLowerCase().indexOf('bb-codes') !== -1) {
+                return true;
+            }
+        }
+        
+        // Перевіряємо через container сторінки розширення
+        var extensionContainer = document.querySelector('.ExtensionPage');
+        if (extensionContainer) {
+            var pageTitle = extensionContainer.querySelector('.ExtensionPage-header h2, .ExtensionPage-header h3');
+            if (pageTitle) {
+                var titleText = pageTitle.textContent || pageTitle.innerText;
+                if (titleText.toLowerCase().indexOf('bbcodes') !== -1 || 
+                    titleText.toLowerCase().indexOf('bb-codes') !== -1) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
     function findAndCreateUI() {
+        if (!isBBcodesExtensionPage()) {
+            return false;
+        }
+        
+        // Шукаємо контейнер для вставки нашого UI
         var forms = document.querySelectorAll('.Form, .ExtensionPage-settings');
-        if (forms.length === 0) return false;
+        if (forms.length === 0) {
+            // Спробуємо знайти інший підходящий контейнер
+            var extensionContainer = document.querySelector('.ExtensionPage');
+            if (extensionContainer) {
+                createUI(extensionContainer);
+                return true;
+            }
+            return false;
+        }
         
         var container = forms[forms.length - 1];
         createUI(container);
@@ -886,6 +984,13 @@ function getAdminScript(string $initialBbcodes): string
     }
     
     function startUIInitialization() {
+        // Спочатку перевіряємо, чи ми на потрібній сторінці
+        if (!isBBcodesExtensionPage()) {
+            // Якщо ні, то припиняємо виконання
+            return;
+        }
+        
+        // Якщо так, то пробуємо створити UI з кількома спробами
         setTimeout(function() {
             if (!findAndCreateUI()) {
                 setTimeout(findAndCreateUI, 300);
